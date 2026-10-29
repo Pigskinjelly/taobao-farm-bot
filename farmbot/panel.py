@@ -169,11 +169,16 @@ def is_panel(boxes: list[ocr.Box]) -> bool:
 
 
 def _is_search_page(boxes: list[ocr.Box]) -> bool:
-    if ocr.find(boxes, SEARCH_PAGE_HINTS):
-        return True
-    # 有搜索框 + "搜一搜"提示，且页面没有倒计时
-    has_input = bool(ocr.find(boxes, ("搜索宝贝", "搜索你想", "输入搜索")))
-    return has_input and not ocr.find_regex(boxes, COUNTDOWN_RX)
+    """是否是"待搜索"页（需要点历史词），而不是搜索结果页。
+
+    真机教训：搜索结果页顶部仍保留「Q搜索宝贝」占位符，
+    早期用"有搜索框就算搜索页"会把结果页误判成搜索页，
+    于是反复点历史词、从不滑动，进度永远 0/3。
+    正确判据：**有历史/发现区 且 没有「滑动浏览得肥料」浮标**。
+    """
+    if ocr.find(boxes, SCROLL_WIDGET_HINTS):
+        return False
+    return bool(ocr.find(boxes, SEARCH_PAGE_HINTS))
 
 
 def _pick_history_keyword(boxes: list[ocr.Box]) -> Optional[ocr.Box]:
@@ -399,6 +404,7 @@ class VisualBot:
         scrolls = 0
         scroll_cap = self.max_scrolls
         saw_widget = False
+        searched = False
 
         while time.time() < deadline:
             boxes = self.look("browse")
@@ -416,14 +422,19 @@ class VisualBot:
                 self.log.step("V", f"识别到收尾文案「{done[0].text}」，返回面板", True)
                 break
 
-            # 「搜一搜」：点一个历史搜索词，再去浏览结果页
+            # 「搜一搜」：点一个历史搜索词，再去浏览结果页（只点一次，避免打转）
             if _is_search_page(boxes):
+                if searched:
+                    self.log.step("V", "点了历史词仍停在搜索页，跳过该任务", False)
+                    self._back_to_panel()
+                    return "blocked"
                 kw = _pick_history_keyword(boxes)
                 if kw is None:
                     self.log.step("V", "搜索页没有可点的历史搜索词，跳过", False)
                     self._back_to_panel()
                     return "blocked"
                 self.tap_box(kw, "点击历史搜索词（代替手动输入）")
+                searched = True
                 time.sleep(2.2)
                 continue
 

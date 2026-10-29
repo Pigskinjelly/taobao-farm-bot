@@ -195,10 +195,18 @@ def main() -> int:
     if args.visual:
         from farmbot.panel import VisualBot
         vlog = Logger(LOG_DIR)
+        u2dev = None
+        if not args.no_u2 and not args.dry_run:
+            try:
+                from farmbot.u2sense import build_device
+                u2dev = build_device(args.serial or adb.serial)
+                print("输入后端: uiautomator2 常驻服务（截图约 0.23s / 点击约 0.18s）")
+            except Exception as e:              # noqa: BLE001
+                print(f"输入后端: adb（uiautomator2 不可用：{type(e).__name__}）")
         try:
             bot = VisualBot(adb, vlog, max_tasks=args.max_ads, shot_dir=SHOT_DIR,
                             dry_run=args.dry_run, cooldown_seconds=args.cooldown,
-                            cooldown_rounds=args.cooldown_rounds)
+                            cooldown_rounds=args.cooldown_rounds, u2dev=u2dev)
             res = bot.run()
             vlog.raw(f"完成 {len(res['done'])} 条浏览任务；失败 {len(res['failed'])} 条")
             return 0

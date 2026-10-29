@@ -290,6 +290,10 @@ def test_visual_panel() -> None:
     boxes += row(910, "百亿补贴双11大额肥料(0/1)", "页面下单赚5万+肥料", "+57000", "去完成")
     boxes += row(1030, "看严选推荐商品(0/5)", "浏览得奖励", "+400", "去完成")
     boxes += row(1150, "逛逛支付宝芭芭农场(0/1)", "还可领", "+1400", "去完成")
+    # 跨 App / 平台互动类：行内同样带"浏览/逛逛"，只能靠黑名单挡住
+    boxes += row(1270, "去快手app领福利(0/1)", "登录并浏览可得", "+600~1200", "去完成")
+    boxes += row(1390, "去头条刷热点领现金(0/1)", "逛逛得", "+300", "去完成")
+    boxes += row(1510, "发评价得肥料(0/1)", "完成带图评价得", "+3000", "去完成")
 
     tasks = scan_panel(boxes)
     keys = [t.type_key for t in tasks]
@@ -300,6 +304,9 @@ def test_visual_panel() -> None:
     check("下单任务被拒绝（+57000 诱惑）", not any("百亿补贴" in k for k in keys))
     check("答题任务被拒绝", not any("问答" in k for k in keys))
     check("支付宝跳转被拒绝", not any("支付宝" in k for k in keys))
+    check("跨 App「去快手app」被拒绝", not any("快手" in k for k in keys), f"实得 {keys}")
+    check("跨 App「头条」被拒绝", not any("头条" in k for k in keys))
+    check("「发评价」被拒绝", not any("评价" in k for k in keys))
     check("按奖励降序", tasks[0].reward >= tasks[-1].reward)
 
 

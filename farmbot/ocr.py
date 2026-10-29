@@ -58,24 +58,41 @@ def engine():
     return _engine
 
 
-def read(png: bytes) -> list[Box]:
-    """对一张 PNG 截图做 OCR，返回文字框列表（按 y 再按 x 排序）。"""
-    import numpy as np
-    from PIL import Image
+def read(png: bytes, roi: Optional[tuple[float, float, float, float]] = None,
+         scale: float = 1.0, min_score: float = 0.0) -> list[Box]:
+    """对一张 PNG 截图做 OCR，返回文字框列表（按 y 再按 x 排序）。
+
+    roi:   (x0, y0, x1, y1) 归一化裁剪区域（0~1），只识别这块。
+           只关心"顶部倒计时"或"面板区域"时用它，能把 1.3s 压到 0.2~0.5s。
+    scale: 识别前缩小比例（坐标会自动换算回全屏像素）。
+    """
     import io
 
-    img = Image.open(io.BytesIO(png)).convert("RGB")
-    arr = np.array(img)
+    import numpy as np
+    from PIL import Image
 
-    result, _elapse = engine()(arr)
+    img = Image.open(io.BytesIO(png)).convert("RGB")
+    W, H = img.size
+    ox, oy = 0, 0
+    if roi:
+        x0, y0, x1, y1 = roi
+        box = (int(W * x0), int(H * y0), int(W * x1), int(H * y1))
+        img = img.crop(box)
+        ox, oy = box[0], box[1]
+    if scale != 1.0:
+        img = img.resize((max(1, int(img.width * scale)),
+                          max(1, int(img.height * scale))), Image.BILINEAR)
+
+    result, _elapse = engine()(np.array(img))
     boxes: list[Box] = []
+    inv = 1.0 / scale
     for item in result or []:
         pts, text, score = item[0], item[1], float(item[2])
         text = (text or "").strip()
-        if not text:
+        if not text or score < min_score:
             continue
-        xs = [p[0] for p in pts]
-        ys = [p[1] for p in pts]
+        xs = [p[0] * inv + ox for p in pts]
+        ys = [p[1] * inv + oy for p in pts]
         boxes.append(Box(text, score, int(min(xs)), int(min(ys)),
                          int(max(xs)), int(max(ys))))
     boxes.sort(key=lambda b: (b.top, b.left))

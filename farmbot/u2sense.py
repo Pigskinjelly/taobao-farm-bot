@@ -73,3 +73,20 @@ class U2Dumper:
             return True
         except Exception:
             return False
+
+
+def build_device(serial: Optional[str] = None):
+    """返回 uiautomator2 的 Device（常驻服务）。
+
+    给视觉通道用作"快速输入/截图后端"：截图约 0.23s、点击约 0.18s，
+    而 `adb exec-out screencap` 约 1.0s、`adb shell input tap` 约 1.3s
+    （每次 input 都要在设备上新起一个 java 进程）。
+    """
+    if "ADBUTILS_ADB_PATH" not in os.environ:
+        from .adb import find_adb
+        os.environ["ADBUTILS_ADB_PATH"] = find_adb()
+
+    import uiautomator2 as u2
+    dev = u2.connect(serial) if serial else u2.connect()
+    dev.info                      # 探活，连不上会抛异常
+    return dev

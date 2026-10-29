@@ -36,9 +36,21 @@ ACTION_WHITELIST = ("去完成", "去观看", "去浏览", "立即领取")
 # 行内出现这些词 = 不是浏览任务 / 有风险 → 跳过
 # 真机见过的高危行：「安装桌面访问小组件 +30000」「百亿补贴双11大额肥料 页面下单赚5万+肥料 +57000」
 # 「逛逛支付宝芭芭农场 +1400」，奖励都比浏览任务高得多，必须靠名单挡住。
-ROW_BLOCKLIST = ("安装", "下载", "开启", "答题", "前往", "支付宝", "支付",
-                 "授权", "开通", "下单", "购买", "付款", "结算", "充值",
-                 "免单", "领取红包", "签到", "邀请", "分享", "预约", "开卡")
+ROW_BLOCKLIST = (
+    # 安装 / 交易类
+    "安装", "下载", "开启", "下单", "购买", "付款", "结算", "充值", "开卡",
+    "免单", "领取红包", "预约", "授权", "开通",
+    # 平台互动类（会以本账号名义产生动作）
+    "答题", "签到", "邀请", "助力", "分享", "关注", "评论", "点赞",
+    "登录", "注册", "评价", "发布", "投稿", "上传",
+    # 跨 App 跳转（真机见过：去快手app领福利 / 去头条刷热点 / 去微博看热搜 / 前往支付宝）
+    "app", "快手", "头条", "微博", "抖音", "小红书", "拼多多", "京东",
+    "美团", "饿了么", "支付宝", "微信", "前往",
+    "支付",
+)
+
+# 只允许这些"纯浏览"语义进入候选（行内出现即可）
+ROW_BROWSE_HINTS = ("浏览", "逛逛")
 
 # 面板 / 浏览页特征
 PANEL_TEXTS = ("做任务赚肥料", "任务赚肥料")
@@ -66,7 +78,7 @@ REWARD_RX = r"[+＋]\s*(\d{2,6})"
 PROGRESS_RX = r"[（(]\s*(\d+)\s*/\s*(\d+)\s*[)）]"
 
 # 浏览页里最多滑动几次（需要滑动才计时的任务靠它推进度条）
-MAX_SCROLLS = 10
+MAX_SCROLLS = 6
 
 
 @dataclass
@@ -209,12 +221,37 @@ def _pick_history_keyword(boxes: list[ocr.Box]) -> Optional[ocr.Box]:
     return cands[0]
 
 
+def _is_home_page(boxes: list[ocr.Box]) -> bool:
+    """淘宝首页特征（底部导航 + 顶部标签）。"""
+    return bool(ocr.find(boxes, ("关注", "推荐", "购物车", "我的淘宝")))
+
+
+def _find_farm_entry(boxes: list[ocr.Box]) -> Optional[ocr.Box]:
+    """在首页找「芭芭农场」入口。
+
+    真机：金刚区图标文字常被 OCR 拆成「芭芭」+「农场」两行，
+    所以不能只匹配完整四字；用"含芭芭/农场 + 位于图标区"来兜。
+    """
+    full = ocr.find(boxes, ("芭芭农场",))
+    if full:
+        return full[0]
+    cands = [b for b in boxes
+             if ("芭芭" in b.text or "农场" in b.text)
+             and 150 < b.top < 700
+             and len(b.text) <= 8]
+    if not cands:
+        return None
+    # 同一行里「芭芭」「农场」两块的左边那个就是图标文字
+    cands.sort(key=lambda b: (b.top // 30, -b.left))
+    return cands[0]
+
+
 class VisualBot:
     """用截图 + OCR 完成浏览任务。所有点击都来自识别到的文字框。"""
 
     def __init__(self, adb: Adb, log: Logger, max_tasks: int = 10,
                  shot_dir=None, dry_run: bool = False, max_scrolls: int = MAX_SCROLLS,
-                 cooldown_seconds: int = 300, cooldown_rounds: int = 6):
+                 cooldown_seconds: int = 300, cooldown_rounds: int = 6, u2dev=None):
         self.adb = adb
         self.log = log
         self.max_tasks = max_tasks
@@ -225,6 +262,10 @@ class VisualBot:
         self.cooldown_seconds = cooldown_seconds
         self.cooldown_rounds = cooldown_rounds
         self.cooldowns_used = 0
+        self.restarts_used = 0
+        self.max_restarts = 2
+        # 可选：uiautomator2 常驻服务，截图 0.23s / 点击 0.18s（adb 是 1.0s / 1.3s）
+        self.u2 = u2dev
         self.done: list[str] = []
         self.failed: list[str] = []
         self.skipped: list[str] = []
@@ -234,28 +275,53 @@ class VisualBot:
 
     # ------------------------------------------------------------ 基础动作
 
-    def look(self, tag: str = "") -> list[ocr.Box]:
+    def shot(self) -> bytes:
+        """截图：优先 u2 常驻服务（~0.23s），失败回退 adb（~1.0s）。"""
+        if self.u2 is not None:
+            try:
+                import io
+                buf = io.BytesIO()
+                self.u2.screenshot().save(buf, format="PNG")
+                data = buf.getvalue()
+                if data.startswith(b"\x89PNG") and b"IEND" in data[-64:]:
+                    return data
+            except Exception:
+                self.u2 = None        # 服务挂了就不再重试，直接用 adb
+        return self.adb.screencap()
+
+    def look(self, tag: str = "", roi=None, scale: float = 1.0) -> list[ocr.Box]:
         last: Optional[Exception] = None
         for _ in range(2):
-            png = self.adb.screencap()
+            png = self.shot()
             if self.shot_dir and tag:
                 self._shot_n += 1
                 p = self.shot_dir / f"{time.strftime('%H%M%S')}_{self._shot_n:03d}_{tag}.png"
                 p.parent.mkdir(parents=True, exist_ok=True)
                 p.write_bytes(png)
             try:
-                return ocr.read(png)
+                return ocr.read(png, roi=roi, scale=scale)
             except Exception as e:          # noqa: BLE001 - 截断/解码失败都重试
                 last = e
                 time.sleep(0.8)
         raise AdbError(f"OCR 识别失败：{last}")
+
+    def look_fast(self, tag: str = "") -> list[ocr.Box]:
+        """只看顶部区域（倒计时/「滑动浏览得肥料」浮标/奖励文案），比全屏快 3~4 倍。"""
+        return self.look(tag=tag, roi=(0.0, 0.0, 1.0, 0.22), scale=0.75)
 
     def tap_box(self, box: ocr.Box, why: str) -> bool:
         if self.dry_run:
             self.log.step("V", f"[dry-run] 本应点击「{box.text}」@({box.cx},{box.cy})", True)
             return True
         try:
-            self.adb.tap(box.cx, box.cy)
+            if self.u2 is not None:
+                try:
+                    self.u2.click(box.cx, box.cy)
+                except Exception:
+                    self.u2 = None
+                    self.adb.tap(box.cx, box.cy)
+            else:
+                self.adb.tap(box.cx, box.cy)
         except AdbError as e:
             self.log.step("V", f"点击「{box.text}」失败：{e}", False)
             return False
@@ -268,7 +334,9 @@ class VisualBot:
         w, h = self.adb.screen_size()
         try:
             if not self.dry_run:
-                self.adb.swipe(w // 2, int(h * 0.76), w // 2, int(h * 0.46), duration_ms=280)
+                # 一次"慢滑"覆盖约 2.2 秒连续滚动：adb input 每次往返固定 ~1.3s，
+                # 短滑 30 次要 40s，长滑 8 次只要 ~22s，浏览时长还更足
+                self.adb.swipe(w // 2, int(h * 0.82), w // 2, int(h * 0.30), duration_ms=2200)
         except AdbError as e:
             self.log.step("V", f"滑动失败：{e}", False)
         time.sleep(0.55)
@@ -298,10 +366,52 @@ class VisualBot:
         hit = ocr.find(boxes, ("开小差", "稍后再试", "人数较多", "晚点再来", "系统繁忙"))
         return hit[0].text if hit else None
 
+    def restart_taobao(self) -> bool:
+        """重启淘宝（force-stop → 重新拉起）。
+
+        用在"首页找不到农场入口"的情况：新账号的首页金刚区会被个性化，
+        入口可能不在第一屏、甚至不出现；重启后一般会回到默认布局。
+        """
+        from . import config as C
+
+        self.restarts_used += 1
+        self.log.raw(f"↻ 未找到农场入口，重启淘宝（第 {self.restarts_used} 次）")
+        try:
+            self.adb.shell("am", "force-stop", C.APP_PACKAGE)
+        except AdbError as e:
+            self.log.raw(f"  force-stop 失败：{e}")
+        time.sleep(2.0)
+        try:
+            self.adb.start_app(C.APP_PACKAGE)
+        except AdbError as e:
+            self.log.raw(f"  启动失败：{e}")
+            return False
+
+        deadline = time.time() + C.APP_START_TIMEOUT + 10
+        while time.time() < deadline:
+            time.sleep(2.0)
+            try:
+                if C.APP_PACKAGE in self.adb.current_focus():
+                    time.sleep(C.PAGE_LOAD_WAIT)
+                    self.log.raw("  淘宝已重启完成")
+                    return True
+            except AdbError:
+                break
+        return False
+
     def open_panel(self) -> bool:
-        """回到集肥料面板：先退到农场页，再点「集肥料」。"""
+        """从任意页面回到「做任务赚肥料」面板。
+
+        分三种情况处理：
+          1. 已在面板 → 直接返回；
+          2. 在农场页但底栏还没渲染（真机重启后常见「正在打开」）→ 等它出来再点「集肥料」；
+          3. 在淘宝首页 → 点「芭芭农场」入口；找不到入口就重启淘宝；
+        农场页的标题也叫「芭芭农场」，所以入口识别只在首页才启用。
+        """
+        from . import config as C
+
         boxes = self.look("farm")
-        for attempt in range(5):
+        for attempt in range(10):
             if is_panel(boxes):
                 if self.recover_if_error(boxes):
                     boxes = self.look("panel_retry")
@@ -316,12 +426,38 @@ class VisualBot:
                 boxes = self.look("panel")
                 continue
 
+            # 农场页但底栏还在加载：等一下再看
+            farm_like = ocr.find(boxes, ("施肥", "一起种", "领红包", "我的收获", "阳光农场"))
+            if farm_like and attempt < 4:
+                self.log.raw("  农场页底栏还在加载（未出现「集肥料」），稍等再试")
+                time.sleep(2.5)
+                boxes = self.look("farm_wait")
+                continue
+
+            # 只有首页的「芭芭农场」才是入口（农场页的同名文字是标题）
+            if _is_home_page(boxes):
+                entry = _find_farm_entry(boxes)
+                if entry is not None:
+                    if not self.tap_box(entry, "从首页进入芭芭农场"):
+                        return False
+                    time.sleep(4.0)
+                    boxes = self.look("farm_after_entry")
+                    continue
+                self.log.step("V", f"在淘宝首页但没找到农场入口（第 {attempt + 1}/10 次）", False)
+                if self.restarts_used < self.max_restarts:
+                    if self.restart_taobao():
+                        boxes = self.look("after_restart")
+                        continue
+                time.sleep(2.0)
+                boxes = self.look("home_retry")
+                continue
+
             popup = ocr.find(boxes, ("明日7点后记得来领", "提醒我明天领", "今天已领取"))
             if popup:
                 self.log.step("V", f"被浮层遮挡：「{popup[0].text}」，需人工关闭", False)
                 return False
 
-            self.log.step("V", f"未看到面板（第 {attempt + 1}/5 次），返回上一层", False)
+            self.log.step("V", f"未看到面板（第 {attempt + 1}/10 次），返回上一层", False)
             self.adb.back()
             time.sleep(1.5)
             boxes = self.look("farm_retry")
@@ -405,9 +541,11 @@ class VisualBot:
         scroll_cap = self.max_scrolls
         saw_widget = False
         searched = False
+        full = True          # 交替全屏/顶部局部识别，省掉一半 OCR 开销
 
         while time.time() < deadline:
-            boxes = self.look("browse")
+            boxes = self.look("browse") if full else self.look_fast("browse_fast")
+            full = not full
 
             human = ocr.find(boxes, ("验证码", "滑块", "安全验证", "账号异常", "环境异常"))
             if human:
@@ -444,7 +582,7 @@ class VisualBot:
                 if not saw_widget:
                     self.log.step("V", f"发现「{widget[0].text}」浮标，持续滑动计入浏览时长", True)
                     saw_widget = True
-                scroll_cap = max(scroll_cap, 30)
+                scroll_cap = max(scroll_cap, 8)
 
             # 读倒计时（浮标旁的数字／「跳过 5s」／「剩余12秒」）
             left = None
@@ -457,10 +595,18 @@ class VisualBot:
                 if left <= 1:
                     self.log.step("V", "倒计时归零", True)
                     break
+                if saw_widget and scrolls < scroll_cap:
+                    # 「滑动浏览得肥料」只认滑动时长，别干等着
+                    for _i in range(2):
+                        if scrolls >= scroll_cap:
+                            break
+                        self.scroll()
+                        scrolls += 1
+                    continue
 
             # 有浮标 → 边滑边等（滑动才是有效浏览）；没浮标 → 滑几批再等
             if scrolls < scroll_cap:
-                batch = 5 if saw_widget else 3
+                batch = 2 if saw_widget else 2
                 for _i in range(batch):
                     if scrolls >= scroll_cap:
                         break
@@ -472,9 +618,10 @@ class VisualBot:
             if left is None:
                 break
 
-            # 滑满了还在倒计时：纯等剩余时间，再回来看是否归零
-            time.sleep(min(max(left - 1, 1.0), 4.0))
-            continue
+            # 滑满了：不再死等（浮标数字常常不随滑动递减，等下去只会耗满 deadline），
+            # 直接回面板，由 _verify 用进度是否前进来判断成败
+            self.log.raw("    滑动次数已用满，返回面板复核")
+            break
 
         if self._back_to_panel():
             return "success"
@@ -523,24 +670,61 @@ class VisualBot:
         return True                   # 整行都找不到 → 任务已完成并移除
 
     def run_task(self, task: PanelTask) -> str:
+        t0 = time.time()
         self.log.step("V", f"开始任务：{task.describe()}", True)
+        res = "failed"
         if not self.tap_box(task.button, f"进入「{task.title}」"):
-            return "failed"
-
-        status = self._browse(task)
-        if status in ("need_human", "blocked"):
-            return status
-
-        if not self._back_to_panel():
-            self.log.step("V", "无法回到任务面板", False)
-            return "failed"
-
-        return "success" if self._verify(task) else "failed"
+            res = "failed"
+        else:
+            t1 = time.time()
+            status = self._browse(task)
+            browse_cost = time.time() - t1
+            if status in ("need_human", "blocked"):
+                res = status
+            elif not self._back_to_panel():
+                self.log.step("V", "无法回到任务面板", False)
+                res = "failed"
+            else:
+                res = "success" if self._verify(task) else "failed"
+            self.log.raw(f"  ⏱ 浏览页 {browse_cost:.1f}s")
+        self.log.raw(f"  ⏱ 本条总计 {time.time() - t0:.1f}s → {res}")
+        return res
 
     # ------------------------------------------------------------ 主循环
 
+    def ensure_taobao(self) -> bool:
+        """确保淘宝在前台；不在就拉起来（手机停桌面/锁屏后常见）。"""
+        from . import config as C
+
+        focus = ""
+        try:
+            focus = self.adb.current_focus()
+        except AdbError:
+            pass
+        if C.APP_PACKAGE in focus:
+            return True
+        self.log.raw(f"淘宝不在前台（{focus or '未知'}），正在启动…")
+        try:
+            self.adb.start_app(C.APP_PACKAGE)
+        except AdbError as e:
+            self.log.step("V", f"启动淘宝失败：{e}", False)
+            return False
+        deadline = time.time() + C.APP_START_TIMEOUT
+        while time.time() < deadline:
+            time.sleep(2.0)
+            try:
+                if C.APP_PACKAGE in self.adb.current_focus():
+                    self.log.raw("淘宝已在前台")
+                    time.sleep(C.PAGE_LOAD_WAIT)
+                    return True
+            except AdbError:
+                break
+        return False
+
     def run(self) -> dict:
         self.log.raw("视觉通道：OCR 驱动，逐条完成浏览任务")
+        if not self.ensure_taobao():
+            return self._summary("无法启动/切到淘宝")
         if not self.open_panel():
             return self._summary("无法进入任务面板")
 

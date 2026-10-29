@@ -1,0 +1,24 @@
+# 运行产物
+logs/
+shots/
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+
+# 设备工具（体积大、且由 Google 单独分发，请按 README 自行下载）
+tools/platform-tools/
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# 本地配置（可能含设备序列号等）
+config.local.json

@@ -1,0 +1,10 @@
+<?xml version='1.0' encoding='UTF-8' standalone='yes' ?>
+<hierarchy rotation="0">
+  <node index="0" text="" resource-id="" class="android.widget.FrameLayout" package="com.taobao.taobao" content-desc="" clickable="false" enabled="true" bounds="[0,0][1080,2400]">
+    <node index="0" text="恭喜获得" resource-id="" class="android.widget.TextView" package="com.taobao.taobao" content-desc="" clickable="false" enabled="true" bounds="[340,700][740,800]" />
+    <node index="1" text="+1200g" resource-id="" class="android.widget.TextView" package="com.taobao.taobao" content-desc="" clickable="false" enabled="true" bounds="[400,840][680,960]" />
+    <node index="2" text="奖励已到账" resource-id="" class="android.widget.TextView" package="com.taobao.taobao" content-desc="" clickable="false" enabled="true" bounds="[340,1000][740,1070]" />
+    <node index="3" text="关闭" resource-id="com.taobao.taobao:id/close" class="android.widget.ImageView" package="com.taobao.taobao" content-desc="关闭" clickable="true" enabled="true" bounds="[960,200][1040,280]" />
+    <node index="4" text="立即下载App" resource-id="" class="android.widget.Button" package="com.taobao.taobao" content-desc="" clickable="true" enabled="true" bounds="[300,1700][780,1800]" />
+  </node>
+</hierarchy>

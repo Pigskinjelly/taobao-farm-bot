@@ -1,0 +1,29 @@
+<?xml version='1.0' encoding='UTF-8' standalone='yes' ?>
+<hierarchy rotation="0">
+  <node index="0" text="" resource-id="" class="android.widget.FrameLayout" package="com.taobao.taobao" content-desc="" clickable="false" enabled="true" bounds="[0,0][1080,2400]">
+    <node index="0" text="集肥料" resource-id="com.taobao.taobao:id/title" class="android.widget.TextView" package="com.taobao.taobao" content-desc="" clickable="false" enabled="true" bounds="[420,120][660,200]" />
+    <node index="1" text="做任务领肥料，每次最多可得 1200g" resource-id="" class="android.widget.TextView" package="com.taobao.taobao" content-desc="" clickable="false" enabled="true" bounds="[60,220][1020,280]" />
+    <node index="2" text="" resource-id="com.taobao.taobao:id/card1" class="android.widget.LinearLayout" package="com.taobao.taobao" content-desc="" clickable="false" enabled="true" bounds="[40,560][1040,720]">
+      <node index="0" text="逛一逛品牌店铺" resource-id="" class="android.widget.TextView" package="com.taobao.taobao" content-desc="" clickable="false" enabled="true" bounds="[100,590][700,650]" />
+      <node index="1" text="+1200g" resource-id="" class="android.widget.TextView" package="com.taobao.taobao" content-desc="" clickable="false" enabled="true" bounds="[100,650][400,710]" />
+      <node index="2" text="去完成" resource-id="com.taobao.taobao:id/btn_go" class="android.widget.Button" package="com.taobao.taobao" content-desc="" clickable="true" enabled="true" bounds="[820,600][1000,690]" />
+    </node>
+    <node index="3" text="" resource-id="com.taobao.taobao:id/card2" class="android.widget.LinearLayout" package="com.taobao.taobao" content-desc="" clickable="false" enabled="true" bounds="[40,760][1040,920]">
+      <node index="0" text="浏览会场 3/5次" resource-id="" class="android.widget.TextView" package="com.taobao.taobao" content-desc="" clickable="false" enabled="true" bounds="[100,790][700,850]" />
+      <node index="1" text="+500g" resource-id="" class="android.widget.TextView" package="com.taobao.taobao" content-desc="" clickable="false" enabled="true" bounds="[100,850][400,910]" />
+      <node index="2" text="去完成" resource-id="com.taobao.taobao:id/btn_go" class="android.widget.Button" package="com.taobao.taobao" content-desc="" clickable="true" enabled="true" bounds="[820,800][1000,890]" />
+    </node>
+    <node index="4" text="" resource-id="com.taobao.taobao:id/card3" class="android.widget.LinearLayout" package="com.taobao.taobao" content-desc="" clickable="false" enabled="true" bounds="[40,960][1040,1120]">
+      <node index="0" text="看视频得肥料" resource-id="" class="android.widget.TextView" package="com.taobao.taobao" content-desc="" clickable="false" enabled="true" bounds="[100,990][700,1050]" />
+      <node index="1" text="900g" resource-id="" class="android.widget.TextView" package="com.taobao.taobao" content-desc="" clickable="false" enabled="true" bounds="[100,1050][400,1110]" />
+      <node index="2" text="已领取" resource-id="com.taobao.taobao:id/btn_go" class="android.widget.Button" package="com.taobao.taobao" content-desc="" clickable="true" enabled="true" bounds="[820,1000][1000,1090]" />
+    </node>
+    <node index="5" text="" resource-id="com.taobao.taobao:id/card4" class="android.widget.LinearLayout" package="com.taobao.taobao" content-desc="" clickable="false" enabled="true" bounds="[40,1160][1040,1320]">
+      <node index="0" text="观看广告得肥料 第2天" resource-id="" class="android.widget.TextView" package="com.taobao.taobao" content-desc="" clickable="false" enabled="true" bounds="[100,1190][700,1250]" />
+      <node index="1" text="+1000" resource-id="" class="android.widget.TextView" package="com.taobao.taobao" content-desc="" clickable="false" enabled="true" bounds="[100,1250][400,1310]" />
+      <node index="2" text="去观看" resource-id="com.taobao.taobao:id/btn_go" class="android.widget.Button" package="com.taobao.taobao" content-desc="" clickable="true" enabled="true" bounds="[820,1200][1000,1290]" />
+    </node>
+    <node index="6" text="下载淘宝特价版领肥料" resource-id="com.taobao.taobao:id/download" class="android.widget.Button" package="com.taobao.taobao" content-desc="" clickable="true" enabled="true" bounds="[300,1500][780,1580]" />
+    <node index="7" text="返回" resource-id="" class="android.widget.ImageView" package="com.taobao.taobao" content-desc="返回" clickable="true" enabled="true" bounds="[10,110][90,190]" />
+  </node>
+</hierarchy>

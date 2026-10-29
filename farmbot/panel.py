@@ -78,7 +78,8 @@ REWARD_RX = r"[+＋]\s*(\d{2,6})"
 PROGRESS_RX = r"[（(]\s*(\d+)\s*/\s*(\d+)\s*[)）]"
 
 # 浏览页里最多滑动几次（需要滑动才计时的任务靠它推进度条）
-MAX_SCROLLS = 6
+MAX_SCROLLS = 4
+SCROLL_DURATION_MS = 4000
 
 
 @dataclass
@@ -246,6 +247,33 @@ def _find_farm_entry(boxes: list[ocr.Box]) -> Optional[ocr.Box]:
     return cands[0]
 
 
+
+def _quota_of(tasks: list["PanelTask"], type_key: str) -> int:
+    for t in tasks:
+        if t.type_key == type_key:
+            return t.quota
+    return 1
+
+
+def is_panel_row_ok(row_text: str, action: str) -> bool:
+    """该行是否属于"可执行的站内浏览任务"。"""
+    if action not in ACTION_WHITELIST:
+        return False
+    if not any(w in row_text for w in ROW_BROWSE_HINTS):
+        return False
+    return not any(w in row_text for w in ROW_BLOCKLIST)
+
+
+def block_reason(row_text: str, action: str) -> str:
+    """给出被拦截的原因，用于报告。"""
+    if action not in ACTION_WHITELIST:
+        return f"按钮「{action}」不在白名单"
+    if not any(w in row_text for w in ROW_BROWSE_HINTS):
+        return "不是浏览类"
+    hit = [w for w in ROW_BLOCKLIST if w in row_text]
+    return "含禁用词 " + "/".join(hit[:3]) if hit else "未通过规则"
+
+
 class VisualBot:
     """用截图 + OCR 完成浏览任务。所有点击都来自识别到的文字框。"""
 
@@ -284,10 +312,16 @@ class VisualBot:
                 self.u2.screenshot().save(buf, format="PNG")
                 data = buf.getvalue()
                 if data.startswith(b"\x89PNG") and b"IEND" in data[-64:]:
+                    if len(data) < 8000:
+                        # 登录页/FLAG_SECURE 窗口会截出纯黑空帧（几 KB）
+                        raise AdbError("截图是空帧（可能是登录页或安全窗口）")
                     return data
             except Exception:
                 self.u2 = None        # 服务挂了就不再重试，直接用 adb
-        return self.adb.screencap()
+        data = self.adb.screencap()
+        if len(data) < 8000:
+            raise AdbError("截图是空帧（可能是登录页或安全窗口）")
+        return data
 
     def look(self, tag: str = "", roi=None, scale: float = 1.0) -> list[ocr.Box]:
         last: Optional[Exception] = None
@@ -336,10 +370,110 @@ class VisualBot:
             if not self.dry_run:
                 # 一次"慢滑"覆盖约 2.2 秒连续滚动：adb input 每次往返固定 ~1.3s，
                 # 短滑 30 次要 40s，长滑 8 次只要 ~22s，浏览时长还更足
-                self.adb.swipe(w // 2, int(h * 0.82), w // 2, int(h * 0.30), duration_ms=2200)
+                self.adb.swipe(w // 2, int(h * 0.85), w // 2, int(h * 0.22), duration_ms=SCROLL_DURATION_MS)
         except AdbError as e:
             self.log.step("V", f"滑动失败：{e}", False)
         time.sleep(0.55)
+
+
+
+    def next_task(self, exclude: set[str], max_scrolls: int = 6) -> Optional[PanelTask]:
+        """从当前滚动位置往下找，返回第一条"可用且未完成"的任务。
+
+        比"按名字定位"稳：面板每次操作后位置不固定，按名字定位容易在
+        列表还没渲染完时扫空、然后滚过头（真机踩过）。
+        """
+        for i in range(max_scrolls + 1):
+            boxes = self.look("scan")
+            if not is_panel(boxes) and i == 0:
+                time.sleep(1.5)
+                boxes = self.look("scan_retry")
+            for t in scan_panel(boxes):
+                if t.type_key not in exclude:
+                    return t
+            self.panel_scroll("down")
+            time.sleep(0.3)
+        return None
+
+    # ------------------------------------------------------------ 面板滚屏枚举
+
+    def panel_scroll(self, direction: str = "down", times: int = 1) -> None:
+        """在面板内滚动（面板是长列表，必须滚动才能看全）。"""
+        w, h = self.adb.screen_size()
+        y1, y2 = (int(h * 0.74), int(h * 0.34)) if direction == "down" \
+            else (int(h * 0.34), int(h * 0.74))
+        for _ in range(times):
+            try:
+                if self.u2 is not None:
+                    self.u2.swipe(w // 2, y1, w // 2, y2, 0.35)
+                else:
+                    self.adb.swipe(w // 2, y1, w // 2, y2, duration_ms=350)
+            except Exception:
+                self.u2 = None
+                try:
+                    self.adb.swipe(w // 2, y1, w // 2, y2, duration_ms=350)
+                except AdbError:
+                    pass
+            time.sleep(0.45)
+
+    def scroll_panel_to_top(self, times: int = 5) -> None:
+        self.panel_scroll("up", times)
+
+    def enumerate_tasks(self, max_scrolls: int = 5) -> list[PanelTask]:
+        """滚完整个面板，收集所有"可执行浏览任务"（按 type_key 去重）。
+
+        这一步是"是否真的全部完成"的依据：只扫首屏会把下面几屏漏掉，
+        曾经因此误报"全部完成"（见 DESIGN.md 15.5）。
+        """
+        self.scroll_panel_to_top()
+        found: dict[str, PanelTask] = {}
+        stale = 0
+        for _ in range(max_scrolls + 1):
+            boxes = self.look("enum")
+            before = len(found)
+            for t in scan_panel(boxes):
+                found.setdefault(t.type_key, t)
+            self._record_blocked(boxes)
+            stale = stale + 1 if len(found) == before else 0
+            if stale >= 2:
+                break
+            self.panel_scroll("down")
+        self.log.raw(f"  面板枚举完成：可执行 {len(found)} 类，拦截 {len(self.skipped)} 项")
+        self.scroll_panel_to_top()
+        return list(found.values())
+
+    def locate_task(self, type_key: str, max_scrolls: int = 8) -> Optional[PanelTask]:
+        """滚到某条任务所在位置，返回最新的按钮坐标。
+
+        真机教训：刚回到面板时列表还没渲染完，直接开扫会"整屏空白→滚走→找不到"。
+        所以每屏先确认面板标题在，不在就等一会儿再读。
+        """
+        self.scroll_panel_to_top(5)
+        for i in range(max_scrolls + 1):
+            boxes = self.look("locate")
+            if not is_panel(boxes) and i == 0:
+                time.sleep(1.8)
+                boxes = self.look("locate_retry")
+            for t in scan_panel(boxes):
+                if t.type_key == type_key:
+                    return t
+            self.panel_scroll("down")
+            time.sleep(0.3)
+        return None
+
+    def _record_blocked(self, boxes: list[ocr.Box]) -> None:
+        """记录被安全规则拦下的任务及原因，供报告用。"""
+        for b in boxes:
+            if b.text.strip() not in ("去完成", "去逛逛", "去观看", "去浏览",
+                                      "去开启", "去答题", "前往", "去签到", "去领取"):
+                continue
+            row = " ".join(r.text for r in _row_of(boxes, b))
+            if not row or is_panel_row_ok(row, b.text.strip()):
+                continue
+            why = block_reason(row, b.text.strip())
+            item = f"{row[:26]}（{why}）"
+            if item not in self.skipped:
+                self.skipped.append(item)
 
     # ------------------------------------------------------------ 面板
 
@@ -582,7 +716,7 @@ class VisualBot:
                 if not saw_widget:
                     self.log.step("V", f"发现「{widget[0].text}」浮标，持续滑动计入浏览时长", True)
                     saw_widget = True
-                scroll_cap = max(scroll_cap, 8)
+                scroll_cap = max(scroll_cap, 4)
 
             # 读倒计时（浮标旁的数字／「跳过 5s」／「剩余12秒」）
             left = None
@@ -692,6 +826,16 @@ class VisualBot:
 
     # ------------------------------------------------------------ 主循环
 
+    LOGIN_HINTS = ("userloginactivity", "login", "passport")
+
+    def login_required(self) -> bool:
+        """前台是不是登录页（淘宝掉登录后会变成 UserLoginActivity）。"""
+        try:
+            focus = self.adb.current_focus().lower()
+        except AdbError:
+            return False
+        return any(h in focus for h in self.LOGIN_HINTS)
+
     def ensure_taobao(self) -> bool:
         """确保淘宝在前台；不在就拉起来（手机停桌面/锁屏后常见）。"""
         from . import config as C
@@ -725,91 +869,87 @@ class VisualBot:
         self.log.raw("视觉通道：OCR 驱动，逐条完成浏览任务")
         if not self.ensure_taobao():
             return self._summary("无法启动/切到淘宝")
+        if self.login_required():
+            return self._summary("淘宝已退出登录（前台是登录页），请重新登录后再跑")
         if not self.open_panel():
             return self._summary("无法进入任务面板")
 
-        rounds: dict[str, int] = {}       # 每类任务已完成次数
-        attempts: dict[str, int] = {}     # 每类任务当前连续失败次数
+        # 第一步：把整个面板滚一遍，拿到真实清单（只扫首屏会漏掉下面几屏）
+        if self.login_required():
+            return self._summary("淘宝已退出登录（前台是登录页），请重新登录后再跑")
+        try:
+            tasks = self.enumerate_tasks()
+        except AdbError as e:
+            return self._summary(f"枚举面板失败：{e}")
+        self.log.raw(f"发现 {len(tasks)} 类可执行浏览任务：")
+        for t in tasks:
+            self.log.raw(f"  - {t.type_key} {t.progress[0]}/{t.progress[1]} +{t.reward}")
+
+        rounds: dict[str, int] = {}
+        attempts: dict[str, int] = {}
         need_human = False
 
-        while len(self.done) < self.max_tasks:
-            boxes = self.look("scan")
-            err = self.panel_error(boxes)
-            if err and not self.recover_if_error(boxes):
-                # 限流：回首页冷却，再回来接着干（不绕过、不换号）
-                if (not self.dry_run and self.cooldowns_used < self.cooldown_rounds
-                        and self.cooldown_and_reenter()):
-                    continue
-                self._stop_reason = f"面板提示「{err}」，冷却 {self.cooldowns_used} 次仍未恢复"
-                self.log.step("V", self._stop_reason, False)
+        for task in tasks:
+            if len(self.done) >= self.max_tasks:
                 break
-            if is_panel(boxes) and self.recover_if_error(boxes):
-                boxes = self.look("scan_recover")
-            if not is_panel(boxes):
-                if not self._back_to_panel():
+            quota = task.quota
+            self.scroll_panel_to_top(5)
+            while rounds.get(task.type_key, 0) < quota:
+                if len(self.done) >= self.max_tasks:
                     break
-                boxes = self.look("scan2")
+                done_types = {k for k, v in rounds.items() if v >= _quota_of(tasks, k)}
+                if self.login_required():
+                    return self._summary("执行途中淘宝掉登录，已停止（避免把空帧当成没任务）")
+                fresh = self.next_task(done_types)
+                if fresh is None:
+                    self.log.step("V", "向下扫完了，面板上已没有可执行任务", True)
+                    break
+                task = fresh
+                quota = _quota_of(tasks, task.type_key)
+                no = rounds.get(task.type_key, 0) + 1
+                self.log.raw(f"  ▸ 第 {no}/{quota} 次：{task.type_key}")
+                status = self.run_task(fresh)
 
-            # 记录本屏所有"不可执行"的按钮，便于汇报
-            for b in boxes:
-                if b.text.strip() in ("去开启", "去答题", "前往", "去签到"):
-                    if b.text.strip() not in self.skipped:
-                        self.skipped.append(b.text.strip())
+                if status == "need_human":
+                    need_human = True
+                    self.log.step("V", "命中风控验证，停止", False)
+                    break
+                if status == "blocked":
+                    attempts[task.type_key] = 2
+                    self.skipped.append(f"{task.type_key}（需人工操作）")
+                    self.log.step("V", f"跳过（需人工）：{task.type_key}", True)
+                    break
+                if status == "success":
+                    rounds[task.type_key] = no
+                    attempts[task.type_key] = 0
+                    self.done.append(f"{task.base_name}({no}/{quota})")
+                    self.log.step("V", f"任务完成（累计 {len(self.done)} 次）："
+                                       f"{task.base_name} {no}/{quota}", True)
+                    time.sleep(1.5)
+                    self._back_to_panel()
+                    continue
 
-            pending = [t for t in scan_panel(boxes)
-                       if rounds.get(t.type_key, 0) < t.quota
-                       and attempts.get(t.type_key, 0) < 2]
-            if not pending:
-                # OCR 偶发漏行：再看一次确认，避免把"没读全"当成"没任务"
-                time.sleep(1.2)
-                boxes = self.look("scan_retry")
-                pending = [t for t in scan_panel(boxes)
-                           if rounds.get(t.type_key, 0) < t.quota
-                           and attempts.get(t.type_key, 0) < 2]
-            if not pending:
-                self.log.step("V", "面板上已没有可执行的浏览任务", True)
-                self._stop_reason = "全部浏览任务已完成（面板无剩余可执行项）"
-                break
-
-            task = pending[0]
-            task_no = rounds.get(task.type_key, 0) + 1
-            self.log.raw(f"  ▸ 第 {task_no}/{task.quota} 次：{task.type_key}")
-
-            status = self.run_task(task)
-
-            if status == "need_human":
-                need_human = True
-                self.log.step("V", "命中风控验证，停止", False)
-                break
-            if status == "blocked":
-                attempts[task.type_key] = 2
-                if task.type_key not in self.skipped:
-                    self.skipped.append(task.type_key)
-                self.log.step("V", f"跳过（需人工操作）：{task.type_key}", True)
-                continue
-            if status == "success":
-                rounds[task.type_key] = task_no
-                attempts[task.type_key] = 0
-                self.done.append(f"{task.base_name}({task_no}/{task.quota})")
-                self.log.step("V", f"任务完成（累计 {len(self.done)} 次）："
-                                   f"{task.base_name} {task_no}/{task.quota}", True)
-                # 轮间隔：连续高频操作会被服务端限流（真机见过"开小差了"）
-                time.sleep(3.0)
-                continue
-
-            attempts[task.type_key] = attempts.get(task.type_key, 0) + 1
-            if attempts[task.type_key] >= 2:
-                if task.type_key not in self.failed:
-                    self.failed.append(task.type_key)
-                self.log.step("V", f"连续 2 次失败，跳过：{task.type_key}", False)
-            else:
+                attempts[task.type_key] = attempts.get(task.type_key, 0) + 1
+                if attempts[task.type_key] >= 2:
+                    if task.type_key not in self.failed:
+                        self.failed.append(task.type_key)
+                    self.log.step("V", f"连续 2 次失败，跳过：{task.type_key}", False)
+                    break
                 self.log.step("V", f"未确认成功，重试：{task.type_key}", False)
+                self._back_to_panel()
+            if need_human:
+                break
 
-        reason = ("命中人工验证" if need_human
-                  else (self._stop_reason or "浏览任务已处理完（无剩余可执行项）"))
-        return self._summary(reason)
+        # 第二步：再枚举一次做交付校验，明确"还剩什么、为什么没做"
+        remain = self.enumerate_tasks()
+        unfinished = [f"{t.type_key} {t.progress[0]}/{t.progress[1]}" for t in remain]
+        reason = ("命中人工验证" if need_human else
+                  (self._stop_reason or
+                   (f"仍剩 {len(unfinished)} 类未完成" if unfinished
+                    else "全部浏览任务已完成（复检无剩余可执行项）")))
+        return self._summary(reason, unfinished)
 
-    def _summary(self, reason: str) -> dict:
+    def _summary(self, reason: str, unfinished: Optional[list[str]] = None) -> dict:
         self.log.raw("")
         self.log.raw("=" * 56)
         self.log.raw("视觉通道执行摘要")
@@ -818,9 +958,15 @@ class VisualBot:
             self.log.raw(f"    ✓ {t}")
         if self.failed:
             self.log.raw(f"  失败：{len(self.failed)} → {'、'.join(self.failed)}")
-        self.log.raw(f"  跳过（非浏览/需人工）：{'、'.join(self.skipped) or '无'}")
+        if unfinished:
+            self.log.raw(f"  仍未完成：{len(unfinished)} 类")
+            for u in unfinished:
+                self.log.raw(f"    ! {u}")
+        self.log.raw(f"  跳过（安全拦截/需人工）：{len(self.skipped)} 项")
+        for s_ in self.skipped[:12]:
+            self.log.raw(f"    - {s_}")
         self.log.raw(f"  限流冷却次数：{self.cooldowns_used}")
         self.log.raw(f"  结束原因：{reason}")
         self.log.raw("=" * 56)
-        return {"done": self.done, "failed": self.failed,
-                "skipped": self.skipped, "reason": reason}
+        return {"done": self.done, "failed": self.failed, "skipped": self.skipped,
+                "unfinished": unfinished or [], "reason": reason}
